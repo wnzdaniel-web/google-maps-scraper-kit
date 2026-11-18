@@ -1,0 +1,103 @@
+name: Compilar FUVEST PDF para impressao
+on:
+  push:
+    branches:
+      - temp/fuvest-impressao-2022-2026
+    paths:
+      - .github/workflows/build-fuvest.yml
+
+permissions:
+  contents: read
+
+jobs:
+  create:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Ferramentas PDF
+        run: pip install pymupdf requests
+      - name: Baixar provas oficiais e montar caderno
+        shell: bash
+        run: |
+          python - <<'PY'
+          import re, time, pathlib, requests, fitz
+          URLS={
+           2022:["https://acervo.fuvest.br/fuvest/2022/fuvest_2022_segunda_fase_dia_2.pdf","https://www.fuvest.br/wp-content/uploads/fuvest_2022_segunda_fase_dia_2.pdf","https://planetageo.com.br/wp-content/uploads/2024/11/fuvest_2022_segunda_fase_dia_2.pdf"],
+           2023:["https://acervo.fuvest.br/fuvest/2023/fuvest_2023_segunda_fase_dia_2.pdf","https://www.fuvest.br/wp-content/uploads/fuvest_2023_segunda_fase_dia_2.pdf"],
+           2024:["https://www.fuvest.br/wp-content/uploads/fuvest2024_segunda_fase_prova_2dia.pdf","https://acervo.fuvest.br/fuvest/2024/fuvest2024_segunda_fase_prova_2dia.pdf"],
+           2025:["https://www.fuvest.br/wp-content/uploads/fuvest2025_prova_2fase_dia2.pdf","https://acervo.fuvest.br/fuvest/2025/fuvest2025_prova_2fase_dia2.pdf"],
+           2026:["https://www.fuvest.br/wp-content/uploads/fuvest2026-fase2-dia2-prova.pdf","https://acervo.fuvest.br/fuvest/2026/fuvest2026-fase2-dia2-prova.pdf"]
+          }
+          def download(yr):
+            errors=[]
+            for url in URLS[yr]:
+              for trial in range(3):
+                try:
+                  r=requests.get(url,headers={"User-Agent":"Mozilla/5.0","Accept":"application/pdf,*/*"},timeout=45)
+                  r.raise_for_status()
+                  if not r.content.startswith(b'%PDF'):raise ValueError("Response is not a PDF")
+                  obj=fitz.open(stream=r.content,filetype="pdf")
+                  if obj.page_count < 18:raise ValueError("Too few pages: "+str(obj.page_count))
+                  print(yr,"OK",url,obj.page_count,"pages",flush=True)
+                  return obj
+                except Exception as ex:
+                  errors.append(str(ex)[:160])
+                  time.sleep(2)
+            raise RuntimeError("Could not fetch year "+str(yr)+": "+" | ".join(errors))
+          def get_section(doc, letter, yr):
+            locations={}
+            for k,p in enumerate(doc):
+              t=p.get_text("text",sort=True)
+              found=re.findall(r'(?<![A-Za-z0-9])([MFBQGH])\s*0([1-6])(?![0-9])',t,re.I)
+              for a,n in found:
+                code=a.upper()+'0'+n
+                locations.setdefault(code,[]).append(k)
+            wanted=[letter+'0'+str(i) for i in range(1,7)]
+            absent=[code for code in wanted if code not in locations]
+            if absent:raise ValueError(f'{yr} {letter} missing {absent}; available {sorted(locations.keys())}')
+            first=min(locations[letter+'01']);last=max(locations[letter+'06'])
+            later=[p for code, nums in locations.items() if code[0]!=letter for p in nums if p>last]
+            end=(min(later)-1) if later else len(doc)-1
+            if end < last:end=last
+            picked=list(range(first,end+1))
+            print(yr,letter,"pages",[p+1 for p in picked],flush=True)
+            return picked
+          def cover(pdf, title, subtitle):
+            p=pdf.new_page(width=595,height=842)
+            dark=(0.09,.14,.23)
+            p.draw_rect(fitz.Rect(0,0,595,18),color=(0.07,.30,.47),fill=(0.07,.30,.47))
+            p.insert_text((49,112),"CADERNO DE TREINO  |  FUVEST  |  2a FASE",fontsize=12,fontname="helv",color=(0.07,.30,.47))
+            p.insert_text((49,175),title,fontsize=33,fontname="hebo",color=dark)
+            p.insert_textbox(fitz.Rect(49,207,540,325),subtitle,fontsize=16,fontname="helv",color=dark)
+            p.draw_line((49,335),(541,335),width=1.8,color=(0.07,.30,.47))
+          out=fitz.open()
+          cover(out,"FUVEST 2022 - 2026","MATEMATICA E FISICA\nQuestoes completas do 2o dia da segunda fase\nImpressao A4, sem gabarito, com figuras e graficos originais")
+          audit=[]
+          for yr in range(2022,2027):
+            src=download(yr)
+            cover(out,f"FUVEST {yr}","2o DIA  |  2a FASE\n6 questoes de Matematica + 6 questoes de Fisica")
+            for letter,name in [('M','MATEMATICA'),('F','FISICA')]:
+              indices=get_section(src,letter,yr)
+              cover(out,name,f"{yr}  |  {letter}01 ate {letter}06\nPAGINAS OFICIAIS, preservadas em PDF")
+              out.insert_pdf(src,from_page=min(indices),to_page=max(indices),links=False,annots=False)
+              audit.append(f"{yr} {name}: original PDF pages "+",".join(str(p+1) for p in indices))
+            src.close()
+          out.set_metadata({"title":"FUVEST 2022-2026: Matematica e Fisica - 2a Fase","subject":"60 official questions, preserved pages including diagrams"})
+          target="FUVEST_2022-2026_Matematica_Fisica_IMPRIMIR.pdf"
+          out.save(target,garbage=4,deflate=True)
+          print("\n",out.page_count,"pages; output:",pathlib.Path(target).stat().st_size,"bytes",flush=True)
+          pathlib.Path("AUDITORIA.txt").write_text("\n".join(audit)+"\n",encoding="utf-8")
+          out.close()
+          PY
+      - name: Entregar o PDF concluido
+        uses: actions/upload-artifact@v4
+        with:
+          name: FUVEST_2022-2026_Matematica_Fisica_IMPRIMIR
+          path: |
+            FUVEST_2022-2026_Matematica_Fisica_IMPRIMIR.pdf
+            AUDITORIA.txt
+          retention-days: 7
